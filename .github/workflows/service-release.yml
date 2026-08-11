@@ -1,0 +1,241 @@
+name: service release
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_tag:
+        description: Exact signed ZxcvaltyFarm release tag (vX.Y.Z)
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Validate closed inputs
+        shell: pwsh
+        env:
+          SOURCE_TAG: ${{ inputs.source_tag }}
+          OBFUCKSCATOR_SOURCE_COMMIT: ${{ vars.OBFUCKSCATOR_SOURCE_COMMIT }}
+          OBFUCKSCATOR_JAR_SHA256: ${{ vars.OBFUCKSCATOR_JAR_SHA256 }}
+        run: |
+          if ($env:SOURCE_TAG -cnotmatch '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') {
+            throw 'Source tag must be an exact stable SemVer release tag.'
+          }
+          if ($env:OBFUCKSCATOR_SOURCE_COMMIT -cnotmatch '^[0-9a-f]{40}$') {
+            throw 'Obfuckscator source commit must be an exact lowercase SHA-1.'
+          }
+          if ($env:OBFUCKSCATOR_JAR_SHA256 -cnotmatch '^[0-9a-f]{64}$') {
+            throw 'Obfuckscator JAR SHA-256 must be an exact lowercase digest.'
+          }
+      - name: Check out exact private source tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: SteffenCarlsen/ZxcvaltyFarm
+          ref: refs/tags/${{ inputs.source_tag }}
+          path: source
+          ssh-key: ${{ secrets.ZXCVALTYFARM_SOURCE_SSH_KEY }}
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Verify authorized signed source tag
+        id: source
+        working-directory: source
+        shell: pwsh
+        env:
+          AUTHORIZED_RELEASE_SIGNERS: ${{ vars.AUTHORIZED_RELEASE_SIGNERS }}
+          SOURCE_TAG: ${{ inputs.source_tag }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:AUTHORIZED_RELEASE_SIGNERS)) {
+            throw 'AUTHORIZED_RELEASE_SIGNERS is required.'
+          }
+          $allowedSigners = Join-Path $env:RUNNER_TEMP 'allowed-release-signers'
+          Set-Content -LiteralPath $allowedSigners -Value $env:AUTHORIZED_RELEASE_SIGNERS
+          git config gpg.ssh.allowedSignersFile $allowedSigners
+          git fetch --force --no-tags origin "refs/tags/$($env:SOURCE_TAG):refs/tags/$($env:SOURCE_TAG)"
+          if ($LASTEXITCODE -ne 0 -or (git cat-file -t $env:SOURCE_TAG) -ne 'tag') {
+            throw 'Source ref is not an annotated remote tag.'
+          }
+          git verify-tag $env:SOURCE_TAG
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Source tag signature is not authorized.'
+          }
+          $sourceCommit = (git rev-list -n 1 $env:SOURCE_TAG).Trim()
+          if ($sourceCommit -cnotmatch '^[0-9a-f]{40}$' -or (git rev-parse HEAD).Trim() -cne $sourceCommit) {
+            throw 'Source tag does not resolve to the checked-out commit.'
+          }
+          "commit=$sourceCommit" >> $env:GITHUB_OUTPUT
+      - name: Check out exact private Obfuckscator source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: SteffenCarlsen/Obfuckscator
+          ref: ${{ vars.OBFUCKSCATOR_SOURCE_COMMIT }}
+          path: source/.ci/obfuckscator
+          ssh-key: ${{ secrets.OBFUCKSCATOR_SOURCE_SSH_KEY }}
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Set up .NET
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68
+        with:
+          dotnet-version: 10.0.301
+          cache: true
+          cache-dependency-path: source/**/packages.lock.json
+      - name: Restore locked dependencies and tools
+        working-directory: source
+        run: |
+          dotnet restore ZxcvaltyFarm.sln --locked-mode
+          dotnet tool restore
+      - name: Build and test
+        working-directory: source
+        run: |
+          dotnet build ZxcvaltyFarm.sln -c Release --no-restore --no-incremental -p:TreatWarningsAsErrors=true
+          dotnet test ZxcvaltyFarm.Tests/ZxcvaltyFarm.Tests.csproj -c Release --no-build --no-restore
+          dotnet test ZxcvaltyFarm.Launcher.Tests/ZxcvaltyFarm.Launcher.Tests.csproj -c Release --no-build --no-restore
+          dotnet test ZxcvaltyFarm.Bootstrapper.Tests/ZxcvaltyFarm.Bootstrapper.Tests.csproj -c Release --no-build --no-restore
+      - name: Build exact service release
+        working-directory: source
+        shell: pwsh
+        env:
+          SOURCE_TAG: ${{ inputs.source_tag }}
+          SOURCE_COMMIT: ${{ steps.source.outputs.commit }}
+          OBFUCKSCATOR_SOURCE_COMMIT: ${{ vars.OBFUCKSCATOR_SOURCE_COMMIT }}
+          OBFUCKSCATOR_JAR_SHA256: ${{ vars.OBFUCKSCATOR_JAR_SHA256 }}
+        run: |
+          $env:JAVA_HOME = $env:JAVA_HOME_17_X64
+          $env:PATH = "$env:JAVA_HOME$([IO.Path]::PathSeparator)$env:PATH"
+          ./ci/Build-ServiceRelease.ps1 `
+            -Version $env:SOURCE_TAG.Substring(1) `
+            -SourceRepository 'SteffenCarlsen/ZxcvaltyFarm' `
+            -SourceCommit $env:SOURCE_COMMIT `
+            -SourceTag "refs/tags/$($env:SOURCE_TAG)" `
+            -WorkflowRun $env:GITHUB_RUN_ID `
+            -WorkflowRunAttempt $env:GITHUB_RUN_ATTEMPT `
+            -ObfuckscatorSourceDirectory .ci/obfuckscator `
+            -ObfuckscatorSourceCommit $env:OBFUCKSCATOR_SOURCE_COMMIT `
+            -ObfuckscatorJarSha256 $env:OBFUCKSCATOR_JAR_SHA256 `
+            -OutputDirectory dist
+      - name: Retain exact release bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: zxcvaltyfarm-services-${{ inputs.source_tag }}
+          path: source/dist
+          if-no-files-found: error
+          retention-days: 30
+
+  deploy:
+    needs: build
+    if: ${{ !cancelled() && needs.build.result == 'success' }}
+    environment: production
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    steps:
+      - name: Download exact release bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: zxcvaltyfarm-services-${{ inputs.source_tag }}
+          path: dist
+      - name: Reverify checksums
+        shell: pwsh
+        run: |
+          Get-Content dist/SHA256SUMS | ForEach-Object {
+            $hash, $file = $_ -split '  ', 2
+            $path = Join-Path dist $file
+            if ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -ne $hash) {
+              throw "Artifact digest mismatch: $file"
+            }
+          }
+      - name: Obtain deployment provenance
+        shell: pwsh
+        run: |
+          $audience = [Uri]::EscapeDataString('zxcvaltyfarm-service-deploy')
+          $response = Invoke-RestMethod `
+            -Headers @{ Authorization = "Bearer $env:ACTIONS_ID_TOKEN_REQUEST_TOKEN" } `
+            -Uri "$env:ACTIONS_ID_TOKEN_REQUEST_URL&audience=$audience"
+          if ($response.value -notmatch '^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$') {
+            throw 'GitHub returned an invalid OIDC token.'
+          }
+          $encodedPayload = $response.value.Split('.')[1].Replace('-', '+').Replace('_', '/')
+          $encodedPayload = $encodedPayload.PadRight($encodedPayload.Length + ((4 - $encodedPayload.Length % 4) % 4), '=')
+          $claims = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($encodedPayload)) | ConvertFrom-Json
+          $manifest = Get-Content dist/service-release-manifest.json -Raw | ConvertFrom-Json
+          $expectedClaims = [ordered]@{
+            sub = 'repo:SteffenCarlsen@9629847/ZxcvaltyFarm-Release-Runner@1331006488:environment:production'
+            repository = 'SteffenCarlsen/ZxcvaltyFarm-Release-Runner'
+            repository_id = '1331006488'
+            repository_owner_id = '9629847'
+            repository_visibility = 'public'
+            workflow_ref = 'SteffenCarlsen/ZxcvaltyFarm-Release-Runner/.github/workflows/service-release.yml@refs/heads/main'
+            ref = 'refs/heads/main'
+            ref_type = 'branch'
+            sha = $env:GITHUB_SHA
+            run_id = $manifest.source.workflowRun.ToString()
+            run_attempt = $manifest.source.workflowRunAttempt.ToString()
+            environment = 'production'
+            event_name = 'workflow_dispatch'
+            runner_environment = 'github-hosted'
+          }
+          $mismatches = @($expectedClaims.GetEnumerator() | ForEach-Object {
+            $actual = [string]$claims.PSObject.Properties[$_.Key].Value
+            if ($actual -ne [string]$_.Value) {
+              [ordered]@{ claim = $_.Key; expected = $_.Value; actual = $actual }
+            }
+          })
+          if ($mismatches.Count -ne 0) {
+            throw "GitHub OIDC claim mismatch: $($mismatches | ConvertTo-Json -Compress)"
+          }
+          [IO.File]::WriteAllText(
+            (Join-Path $PWD 'dist/service-release-oidc.jwt'),
+            $response.value,
+            [Text.UTF8Encoding]::new($false))
+      - name: Configure pinned deployment identity
+        shell: bash
+        env:
+          DEPLOY_HOST: ${{ vars.ZXCVALTYFARM_DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ vars.ZXCVALTYFARM_DEPLOY_PORT }}
+          DEPLOY_USER: ${{ vars.ZXCVALTYFARM_DEPLOY_USER }}
+          DEPLOY_KNOWN_HOSTS: ${{ vars.ZXCVALTYFARM_DEPLOY_KNOWN_HOSTS }}
+          DEPLOY_SSH_KEY: ${{ secrets.ZXCVALTYFARM_DEPLOY_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          [[ "$DEPLOY_HOST" =~ ^[A-Za-z0-9.-]+$ ]]
+          [[ "$DEPLOY_PORT" =~ ^[0-9]{1,5}$ ]]
+          (( DEPLOY_PORT >= 1 && DEPLOY_PORT <= 65535 ))
+          [[ "$DEPLOY_USER" =~ ^[a-z_][a-z0-9_-]*$ ]]
+          [[ -n "$DEPLOY_KNOWN_HOSTS" && -n "$DEPLOY_SSH_KEY" ]]
+          install -d -m 0700 "$RUNNER_TEMP/zxf-ssh"
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$RUNNER_TEMP/zxf-ssh/key"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$RUNNER_TEMP/zxf-ssh/known_hosts"
+          chmod 0600 "$RUNNER_TEMP/zxf-ssh/key" "$RUNNER_TEMP/zxf-ssh/known_hosts"
+          cat > "$RUNNER_TEMP/zxf-ssh/config" <<EOF
+          Host zxcvaltyfarm-production
+              HostName $DEPLOY_HOST
+              Port $DEPLOY_PORT
+              User $DEPLOY_USER
+              IdentityFile $RUNNER_TEMP/zxf-ssh/key
+              UserKnownHostsFile $RUNNER_TEMP/zxf-ssh/known_hosts
+              IdentitiesOnly yes
+              StrictHostKeyChecking yes
+              BatchMode yes
+          EOF
+          chmod 0600 "$RUNNER_TEMP/zxf-ssh/config"
+      - name: Upload and invoke fixed server deployment
+        shell: bash
+        run: |
+          set -euo pipefail
+          deployment_id="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          tar -C dist -cf - . | ssh -F "$RUNNER_TEMP/zxf-ssh/config" \
+            zxcvaltyfarm-production "upload $deployment_id"
+          ssh -F "$RUNNER_TEMP/zxf-ssh/config" \
+            zxcvaltyfarm-production "deploy $deployment_id"
+      - name: Erase deployment key
+        if: always()
+        shell: bash
+        run: rm -f -- "$RUNNER_TEMP/zxf-ssh/key"
