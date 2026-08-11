@@ -76,6 +76,11 @@ jobs:
           ssh-key: ${{ secrets.OBFUCKSCATOR_SOURCE_SSH_KEY }}
           persist-credentials: false
           fetch-depth: 1
+      - name: Set up exact Obfuckscator JDK
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3
+        with:
+          distribution: temurin
+          java-version: '17.0.17+10'
       - name: Install exact Noble Authenticode engine
         run: |
           sudo apt-get update -qq
@@ -151,8 +156,6 @@ jobs:
         shell: pwsh
         working-directory: source
         run: |
-          $env:JAVA_HOME = $env:JAVA_HOME_17_X64
-          $env:PATH = "$env:JAVA_HOME$([IO.Path]::PathSeparator)$env:PATH"
           ./ci/Build-ServiceRelease.ps1 `
             -Version 0.0.0-ci `
             -OutputDirectory dist `
