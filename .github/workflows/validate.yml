@@ -72,7 +72,7 @@ jobs:
         with:
           repository: SteffenCarlsen/Obfuckscator
           ref: ${{ env.OBFUCKSCATOR_SOURCE_COMMIT }}
-          path: source/.ci/obfuckscator
+          path: obfuckscator
           ssh-key: ${{ secrets.OBFUCKSCATOR_SOURCE_SSH_KEY }}
           persist-credentials: false
           fetch-depth: 1
@@ -161,7 +161,7 @@ jobs:
             -SourceTag "validation:$env:SOURCE_REF" `
             -WorkflowRun $env:GITHUB_RUN_ID `
             -WorkflowRunAttempt $env:GITHUB_RUN_ATTEMPT `
-            -ObfuckscatorSourceDirectory .ci/obfuckscator `
+            -ObfuckscatorSourceDirectory ../obfuckscator `
             -ObfuckscatorSourceCommit $env:OBFUCKSCATOR_SOURCE_COMMIT `
             -ObfuckscatorJarSha256 $env:OBFUCKSCATOR_JAR_SHA256
           Get-Content dist/SHA256SUMS | ForEach-Object {

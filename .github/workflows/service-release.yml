@@ -74,7 +74,7 @@ jobs:
         with:
           repository: SteffenCarlsen/Obfuckscator
           ref: ${{ vars.OBFUCKSCATOR_SOURCE_COMMIT }}
-          path: source/.ci/obfuckscator
+          path: obfuckscator
           ssh-key: ${{ secrets.OBFUCKSCATOR_SOURCE_SSH_KEY }}
           persist-credentials: false
           fetch-depth: 1
@@ -114,7 +114,7 @@ jobs:
             -SourceTag "refs/tags/$($env:SOURCE_TAG)" `
             -WorkflowRun $env:GITHUB_RUN_ID `
             -WorkflowRunAttempt $env:GITHUB_RUN_ATTEMPT `
-            -ObfuckscatorSourceDirectory .ci/obfuckscator `
+            -ObfuckscatorSourceDirectory ../obfuckscator `
             -ObfuckscatorSourceCommit $env:OBFUCKSCATOR_SOURCE_COMMIT `
             -ObfuckscatorJarSha256 $env:OBFUCKSCATOR_JAR_SHA256 `
             -OutputDirectory dist
