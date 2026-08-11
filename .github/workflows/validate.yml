@@ -81,11 +81,15 @@ jobs:
         with:
           distribution: temurin
           java-version: '17.0.17+10'
-      - name: Install exact Noble Authenticode engine
+      - name: Install exact Debian Authenticode engine
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq osslsigncode=2.8-2
-          test "$(dpkg-query -W -f='${Version}' osslsigncode)" = 2.8-2
+          curl -fsSLo /tmp/osslsigncode.deb \
+            https://deb.debian.org/debian/pool/main/o/osslsigncode/osslsigncode_2.9-1~bpo12+1_amd64.deb
+          echo 'd867e4f38487eda98ce4400f1e0b96eb947bb170f88481931f6d50b733e9a4df  /tmp/osslsigncode.deb' \
+            | sha256sum --check --status -
+          sudo dpkg -i /tmp/osslsigncode.deb >/dev/null
+          rm -f /tmp/osslsigncode.deb
+          test "$(dpkg-query -W -f='${Version}' osslsigncode)" = 2.9-1~bpo12+1
           sudo dpkg --verify osslsigncode >/dev/null
       - name: Reject tracked credentials
         shell: pwsh
@@ -120,6 +124,9 @@ jobs:
           bash ops/provision-operator-identity.sh self-test
           bash ops/provision-deployment-policy-operator-identity.sh self-test
           python3 ci/test-policy-operator-client.py
+      - name: Check initial platform-root ceremony
+        working-directory: source
+        run: python3 ci/test-initial-platform-root.py --openssl /usr/bin/openssl
       - name: Validate Caddy and readiness contracts
         shell: pwsh
         working-directory: source
