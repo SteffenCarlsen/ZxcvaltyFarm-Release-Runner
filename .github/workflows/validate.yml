@@ -173,6 +173,14 @@ jobs:
               throw "Artifact digest mismatch: $file"
             }
           }
+      - name: Retain failed Obfuckscator reproducibility evidence
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: obfuckscator-repro-${{ github.run_id }}
+          path: obfuckscator/build/libs/obfuckscator-1.0.0.jar
+          if-no-files-found: error
+          retention-days: 1
 
   launcher-aot:
     strategy:
