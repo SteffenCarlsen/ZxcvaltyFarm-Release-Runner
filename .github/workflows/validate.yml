@@ -1,0 +1,294 @@
+name: validate private source
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Exact ZxcvaltyFarm branch, tag, or commit to validate
+        required: true
+        type: string
+        default: feature/product-test-vertical-design
+
+permissions: {}
+
+env:
+  SOURCE_REF: ${{ inputs.source_ref }}
+  OBFUCKSCATOR_SOURCE_COMMIT: ${{ vars.OBFUCKSCATOR_SOURCE_COMMIT }}
+  OBFUCKSCATOR_JAR_SHA256: ${{ vars.OBFUCKSCATOR_JAR_SHA256 }}
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: zxf_tests
+          POSTGRES_USER: zxf_tests
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U zxf_tests -d zxf_tests"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - name: Validate closed inputs
+        shell: pwsh
+        run: |
+          if ($env:SOURCE_REF -cnotmatch '^[A-Za-z0-9._/-]{1,200}$' -or
+              $env:SOURCE_REF.Contains('..', [StringComparison]::Ordinal)) {
+            throw 'Source ref is invalid.'
+          }
+          if ($env:OBFUCKSCATOR_SOURCE_COMMIT -cnotmatch '^[0-9a-f]{40}$') {
+            throw 'Obfuckscator source commit must be an exact lowercase SHA-1.'
+          }
+          if ($env:OBFUCKSCATOR_JAR_SHA256 -cnotmatch '^[0-9a-f]{64}$') {
+            throw 'Obfuckscator JAR SHA-256 must be an exact lowercase digest.'
+          }
+      - name: Check out exact private ZxcvaltyFarm source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: SteffenCarlsen/ZxcvaltyFarm
+          ref: ${{ env.SOURCE_REF }}
+          path: source
+          ssh-key: ${{ secrets.ZXCVALTYFARM_SOURCE_SSH_KEY }}
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Bind exact source commit
+        shell: pwsh
+        run: |
+          $commit = (git -C source rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $commit -cnotmatch '^[0-9a-f]{40}$') {
+            throw 'Unable to resolve exact private source commit.'
+          }
+          "SOURCE_COMMIT=$commit" >> $env:GITHUB_ENV
+      - name: Check out exact private Obfuckscator source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: SteffenCarlsen/Obfuckscator
+          ref: ${{ env.OBFUCKSCATOR_SOURCE_COMMIT }}
+          path: source/.ci/obfuckscator
+          ssh-key: ${{ secrets.OBFUCKSCATOR_SOURCE_SSH_KEY }}
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Install exact Noble Authenticode engine
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq osslsigncode=2.8-2
+          test "$(dpkg-query -W -f='${Version}' osslsigncode)" = 2.8-2
+          sudo dpkg --verify osslsigncode >/dev/null
+      - name: Reject tracked credentials
+        shell: pwsh
+        working-directory: source
+        run: ./ci/Test-NoSecrets.ps1
+      - name: Check anti-MITM operations contract
+        shell: pwsh
+        working-directory: source
+        run: ./ci/Test-AntiMitmOpsContract.ps1
+      - name: Check Host Release CI wrapper
+        working-directory: source
+        run: bash ci/test-host-release-ci-wrapper.sh
+      - name: Check live forced-command SSH fixture
+        working-directory: source
+        run: |
+          if [[ ! -x /usr/sbin/sshd ]]; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq openssh-server
+          fi
+          sudo bash ci/test-host-release-ci-live-sshd.sh
+      - name: Check Launcher Authenticode provisioning
+        shell: pwsh
+        working-directory: source
+        run: ./ci/Test-LauncherAuthenticodeProvisioning.ps1
+      - name: Check operator boundaries
+        shell: pwsh
+        working-directory: source
+        run: ./ci/Test-OperatorBoundary.ps1
+      - name: Check disposable operator identities
+        working-directory: source
+        run: |
+          bash ops/provision-operator-identity.sh self-test
+          bash ops/provision-deployment-policy-operator-identity.sh self-test
+          python3 ci/test-policy-operator-client.py
+      - name: Validate Caddy and readiness contracts
+        shell: pwsh
+        working-directory: source
+        run: ./ci/Test-CaddyConfig.ps1
+      - name: Check Linux readiness implementation
+        working-directory: source
+        run: bash ops/zxcvaltyfarm-readiness self-test
+      - name: Set up .NET
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68
+        with:
+          dotnet-version: 10.0.301
+          cache: true
+          cache-dependency-path: source/**/packages.lock.json
+      - name: Restore locked dependencies
+        working-directory: source
+        run: dotnet restore ZxcvaltyFarm.sln --locked-mode
+      - name: Build warning-free solution
+        working-directory: source
+        run: dotnet build ZxcvaltyFarm.sln -c Release --no-restore --no-incremental -p:TreatWarningsAsErrors=true
+      - name: Test backend with PostgreSQL
+        working-directory: source
+        env:
+          ZXCVALTYFARM_TEST_POSTGRES: Host=127.0.0.1;Port=5432;Database=zxf_tests;Username=zxf_tests
+        run: dotnet test ZxcvaltyFarm.Tests/ZxcvaltyFarm.Tests.csproj -c Release --no-build --no-restore
+      - name: Test Launcher and bootstrapper
+        working-directory: source
+        run: |
+          dotnet test ZxcvaltyFarm.Launcher.Tests/ZxcvaltyFarm.Launcher.Tests.csproj -c Release --no-build --no-restore
+          dotnet test ZxcvaltyFarm.Bootstrapper.Tests/ZxcvaltyFarm.Bootstrapper.Tests.csproj -c Release --no-build --no-restore
+      - name: Restore pinned tools
+        working-directory: source
+        run: dotnet tool restore
+      - name: Build and reverify deployable service artifacts
+        shell: pwsh
+        working-directory: source
+        run: |
+          $env:JAVA_HOME = $env:JAVA_HOME_17_X64
+          $env:PATH = "$env:JAVA_HOME$([IO.Path]::PathSeparator)$env:PATH"
+          ./ci/Build-ServiceRelease.ps1 `
+            -Version 0.0.0-ci `
+            -OutputDirectory dist `
+            -SourceRepository SteffenCarlsen/ZxcvaltyFarm `
+            -SourceCommit $env:SOURCE_COMMIT `
+            -SourceTag "validation:$env:SOURCE_REF" `
+            -WorkflowRun $env:GITHUB_RUN_ID `
+            -WorkflowRunAttempt $env:GITHUB_RUN_ATTEMPT `
+            -ObfuckscatorSourceDirectory .ci/obfuckscator `
+            -ObfuckscatorSourceCommit $env:OBFUCKSCATOR_SOURCE_COMMIT `
+            -ObfuckscatorJarSha256 $env:OBFUCKSCATOR_JAR_SHA256
+          Get-Content dist/SHA256SUMS | ForEach-Object {
+            $hash, $file = $_ -split '  ', 2
+            if ((Get-FileHash -LiteralPath (Join-Path dist $file) -Algorithm SHA256).Hash.ToLowerInvariant() -ne $hash) {
+              throw "Artifact digest mismatch: $file"
+            }
+          }
+
+  launcher-aot:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2025
+            rid: win-x64
+          - os: ubuntu-22.04
+            rid: linux-x64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    steps:
+      - name: Validate source ref
+        shell: pwsh
+        run: |
+          if ($env:SOURCE_REF -cnotmatch '^[A-Za-z0-9._/-]{1,200}$' -or
+              $env:SOURCE_REF.Contains('..', [StringComparison]::Ordinal)) {
+            throw 'Source ref is invalid.'
+          }
+      - name: Check out exact private ZxcvaltyFarm source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: SteffenCarlsen/ZxcvaltyFarm
+          ref: ${{ env.SOURCE_REF }}
+          path: source
+          ssh-key: ${{ secrets.ZXCVALTYFARM_SOURCE_SSH_KEY }}
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Bind exact source commit
+        shell: pwsh
+        run: |
+          $commit = (git -C source rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $commit -cnotmatch '^[0-9a-f]{40}$') {
+            throw 'Unable to resolve exact private source commit.'
+          }
+          "SOURCE_COMMIT=$commit" >> $env:GITHUB_ENV
+      - name: Set up .NET
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68
+        with:
+          dotnet-version: 10.0.301
+          cache: true
+          cache-dependency-path: source/**/packages.lock.json
+      - name: Restore locked NativeAOT dependencies
+        working-directory: source
+        run: |
+          dotnet restore ZxcvaltyFarm.Launcher/ZxcvaltyFarm.Launcher.csproj --locked-mode
+          dotnet restore ZxcvaltyFarm.Launcher.NativeAotFixtures/ZxcvaltyFarm.Launcher.NativeAotFixtures.csproj --locked-mode
+          dotnet restore ZxcvaltyFarm.Bootstrapper/ZxcvaltyFarm.Bootstrapper.csproj --locked-mode
+      - name: Publish warning-free NativeAOT bootstrapper
+        shell: pwsh
+        working-directory: source
+        run: |
+          $output = 'dist/bootstrapper/${{ matrix.rid }}'
+          dotnet publish ZxcvaltyFarm.Bootstrapper/ZxcvaltyFarm.Bootstrapper.csproj `
+            --configuration Release --runtime ${{ matrix.rid }} --self-contained true `
+            --no-restore --output $output -p:ContinuousIntegrationBuild=true -p:TreatWarningsAsErrors=true
+          if ($LASTEXITCODE -ne 0) { throw 'Bootstrapper NativeAOT publication failed.' }
+          Get-ChildItem -LiteralPath $output -File |
+            Where-Object { $_.Extension -in '.pdb', '.dbg' } | Remove-Item -Force
+          $entryPoint = if ('${{ matrix.rid }}' -eq 'win-x64') {
+            'ZxcvaltyFarm.Bootstrapper.exe'
+          } else {
+            'ZxcvaltyFarm.Bootstrapper'
+          }
+          $files = @(Get-ChildItem -LiteralPath $output -File)
+          if ($files.Count -ne 1 -or $files[0].Name -cne $entryPoint) {
+            throw 'Bootstrapper publication must contain only its exact platform entrypoint.'
+          }
+      - name: Publish and execute NativeAOT contract fixtures
+        shell: pwsh
+        working-directory: source
+        run: |
+          $output = 'dist/launcher-nativeaot-fixtures/${{ matrix.rid }}'
+          dotnet publish ZxcvaltyFarm.Launcher.NativeAotFixtures/ZxcvaltyFarm.Launcher.NativeAotFixtures.csproj `
+            --configuration Release --runtime ${{ matrix.rid }} --self-contained true `
+            --no-restore --output $output -p:ContinuousIntegrationBuild=true -p:TreatWarningsAsErrors=true
+          if ($LASTEXITCODE -ne 0) { throw 'NativeAOT fixture publication failed.' }
+          $entryPoint = if ('${{ matrix.rid }}' -eq 'win-x64') {
+            'ZxcvaltyFarm.Launcher.NativeAotFixtures.exe'
+          } else {
+            'ZxcvaltyFarm.Launcher.NativeAotFixtures'
+          }
+          & (Join-Path $output $entryPoint)
+          if ($LASTEXITCODE -ne 0) { throw 'NativeAOT contract fixtures failed.' }
+      - name: Publish warning-free NativeAOT Launcher
+        shell: pwsh
+        working-directory: source
+        run: |
+          $profileFixture = 'contracts/anti-mitm/v1/fixtures/positive/launcher-transport-profile.json'
+          $rootFixture = 'contracts/anti-mitm/v1/fixtures/positive/launcher-root-public.p256.spki.base64'
+          $profilePath = Join-Path $env:RUNNER_TEMP 'launcher-transport-profile-v1.json'
+          $rootPath = Join-Path $env:RUNNER_TEMP 'launcher-root-public.p256.spki'
+          $sourceEpoch = [long](git show -s --format=%ct $env:SOURCE_COMMIT)
+          if ($LASTEXITCODE -ne 0) { throw 'Unable to resolve validation source epoch.' }
+          $profile = [IO.File]::ReadAllText($profileFixture).TrimEnd("`r", "`n")
+          $expected = '"profileIssuedAtUnixMs":1780000000000'
+          if (($profile.Split($expected).Count - 1) -ne 1) {
+            throw 'Validation transport profile has an unexpected issued-time fixture.'
+          }
+          $profile = $profile.Replace($expected, '"profileIssuedAtUnixMs":' + ($sourceEpoch * 1000L))
+          try {
+            [IO.File]::WriteAllText($profilePath, $profile, [Text.UTF8Encoding]::new($false))
+            [IO.File]::WriteAllBytes(
+              $rootPath,
+              [Convert]::FromBase64String([IO.File]::ReadAllText($rootFixture).Trim()))
+            ./ci/Build-LauncherMember.ps1 `
+              -Version 1.0.15 `
+              -Rid ${{ matrix.rid }} `
+              -OutputDirectory dist/${{ matrix.rid }} `
+              -TransportProfilePath $profilePath `
+              -RootPublicKeyPath $rootPath `
+              -EnableTransport `
+              -SourceCommit $env:SOURCE_COMMIT
+          }
+          finally {
+            foreach ($path in @($profilePath, $rootPath)) {
+              if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force }
+            }
+          }
