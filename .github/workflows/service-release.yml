@@ -56,8 +56,7 @@ jobs:
           $allowedSigners = Join-Path $env:RUNNER_TEMP 'allowed-release-signers'
           Set-Content -LiteralPath $allowedSigners -Value $env:AUTHORIZED_RELEASE_SIGNERS
           git config gpg.ssh.allowedSignersFile $allowedSigners
-          git fetch --force --no-tags origin "refs/tags/$($env:SOURCE_TAG):refs/tags/$($env:SOURCE_TAG)"
-          if ($LASTEXITCODE -ne 0 -or (git cat-file -t $env:SOURCE_TAG) -ne 'tag') {
+          if ((git cat-file -t $env:SOURCE_TAG) -ne 'tag') {
             throw 'Source ref is not an annotated remote tag.'
           }
           git verify-tag $env:SOURCE_TAG
